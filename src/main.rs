@@ -89,13 +89,6 @@ async fn main() {
 async fn process_directory(dir_path: &PathBuf, override_files: bool, recursive: bool) {
     match scan_directory(dir_path) {
         Ok((audio_files, subdirs)) => {
-            println!(
-                "\n{} {}, {} Songs found\n",
-                "Directory:".blue().bold(),
-                dir_path.display().to_string().white(),
-                audio_files.len()
-            );
-
             // Process audio files in current directory
             if !audio_files.is_empty() {
                 for file_path in audio_files {
@@ -123,22 +116,12 @@ async fn process_file(file_path: &PathBuf, override_files: bool) {
     let metadata_result = read_metadata(file_path).await;
     match metadata_result {
         Ok(metadata) => {
-            println!(
-                "{} {}",
-                "Processing:".cyan().bold(),
-                file_path
-                    .file_name()
-                    .map(|name| name.to_string_lossy())
-                    .unwrap_or_else(|| "Unknown file".into())
-                    .to_string()
-                    .white()
-            );
-            // Check if lyrics files already exist
-            println!(
-                "{} {}",
+            print!(
+                "{} {} ",
                 "Found:".green().bold(),
                 metadata.to_string().white()
             );
+            // Check if lyrics files already exist
             let is_instrumental;
             let lrc_exists = match get_lyrics_file_path(file_path, "lrc") {
                 Ok(path) => {
@@ -176,7 +159,7 @@ async fn process_file(file_path: &PathBuf, override_files: bool) {
 
             if should_fetch {
                 match fetch_lyrics(&metadata).await {
-                    Ok(lyrics_result) => {
+                    Ok(Some(lyrics_result)) => {
                         let header = generate_header(
                             &metadata.track_name,
                             &metadata.artist_name,
@@ -191,7 +174,7 @@ async fn process_file(file_path: &PathBuf, override_files: bool) {
                                     println!("{}", "Marked as Instrumental".yellow().bold());
                                 }
                                 Err(e) => {
-                                    println!(
+                                    eprintln!(
                                         "{} {}",
                                         "Failed:".red().bold(),
                                         format!("Failed to save instrumental LRC file: {}", e)
@@ -206,12 +189,12 @@ async fn process_file(file_path: &PathBuf, override_files: bool) {
                                 Ok(lrc_path) => {
                                     println!(
                                         "{} {}",
-                                        "Saved synced lyrics to:".green().bold(),
+                                        "Saved Synced Lyrics to:".green().bold(),
                                         lrc_path.display().to_string().white()
                                     );
                                 }
                                 Err(e) => {
-                                    println!(
+                                    eprintln!(
                                         "{} {}",
                                         "Failed:".red().bold(),
                                         format!("Failed to save LRC file: {}", e).red()
@@ -225,12 +208,12 @@ async fn process_file(file_path: &PathBuf, override_files: bool) {
                                 Ok(txt_path) => {
                                     println!(
                                         "{} {}",
-                                        "Saved plain lyrics to:".green().bold(),
+                                        "Saved Plain Lyrics to:".green().bold(),
                                         txt_path.display().to_string().white()
                                     );
                                 }
                                 Err(e) => {
-                                    println!(
+                                    eprintln!(
                                         "{} {}",
                                         "Failed:".red().bold(),
                                         format!("Failed to save TXT file: {}", e).red()
@@ -239,8 +222,11 @@ async fn process_file(file_path: &PathBuf, override_files: bool) {
                             }
                         }
                     }
+                    Ok(None) => {
+                        println!("{}", "Track not found in LRCLIB database".red());
+                    }
                     Err(e) => {
-                        println!(
+                        eprintln!(
                             "{} {}",
                             "Failed:".red().bold(),
                             format!("Failed to fetch lyrics: {}", e).red()
@@ -249,22 +235,23 @@ async fn process_file(file_path: &PathBuf, override_files: bool) {
                 }
             } else {
                 println!(
-                    "{} {} - {}",
-                    "Skipped fetching for".yellow().bold(),
-                    &metadata.track_name.white(),
-                    "keeping existing files".yellow()
+                    "{}",
+                    if is_instrumental {
+                        "Track Marked as instrumental, Skipping".bold().yellow()
+                    } else {
+                        "Existing lyrics found, Skipping".bold().yellow()
+                    }
                 );
             }
         }
         Err(e) => {
-            println!(
+            eprintln!(
                 "{} {}",
                 "Error:".red().bold(),
                 format!("Error reading metadata for {}: {}", file_path.display(), e).red()
             );
         }
     }
-    println!("");
 }
 
 fn scan_directory(
@@ -325,7 +312,7 @@ async fn read_metadata(file_path: &PathBuf) -> Result<TrackMetadata, Box<dyn std
 
 async fn fetch_lyrics(
     metadata: &TrackMetadata,
-) -> Result<LyricsResponse, Box<dyn std::error::Error>> {
+) -> Result<Option<LyricsResponse>, Box<dyn std::error::Error>> {
     let client = reqwest::Client::new();
 
     let url = format!(
@@ -347,9 +334,9 @@ async fn fetch_lyrics(
 
     if response.status().is_success() {
         let lyrics_response: LyricsResponse = response.json().await?;
-        Ok(lyrics_response)
+        Ok(Some(lyrics_response))
     } else if response.status() == 404 {
-        Err("Track not found in LRCLIB database".into())
+        Ok(None)
     } else {
         Err(format!("API request failed with status: {}", response.status()).into())
     }
