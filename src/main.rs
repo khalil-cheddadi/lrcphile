@@ -1,4 +1,5 @@
 use clap::Parser;
+use colored::Colorize;
 use lofty::{file::AudioFile, prelude::TaggedFileExt, probe::Probe, tag::Accessor};
 use serde::Deserialize;
 use std::fs;
@@ -54,8 +55,11 @@ impl std::fmt::Display for TrackMetadata {
         let seconds = (self.duration as u32) % 60;
         write!(
             f,
-            "{} - {} by {} ({}:{:02})",
-            self.track_name, self.album_name, self.artist_name, minutes, seconds,
+            "{} - {} by {} ({})",
+            self.track_name.bright_white().bold(),
+            self.album_name.bright_cyan(),
+            self.artist_name.bright_yellow(),
+            format!("{}:{:02}", minutes, seconds).bright_magenta()
         )
     }
 }
@@ -70,8 +74,13 @@ async fn main() {
         process_directory(&cli.path, cli.override_files, cli.recursive).await;
     } else {
         eprintln!(
-            "Path does not exist or is not a file or directory: {}",
-            cli.path.display()
+            "{} {}",
+            "Error:".red().bold(),
+            format!(
+                "Path does not exist or is not a file or directory: {}",
+                cli.path.display()
+            )
+            .red()
         );
         std::process::exit(1);
     }
@@ -80,24 +89,32 @@ async fn main() {
 async fn process_directory(dir_path: &PathBuf, override_files: bool, recursive: bool) {
     match scan_directory(dir_path) {
         Ok((audio_files, subdirs)) => {
+            println!(
+                "\n{} {}, {} Songs found\n",
+                "Directory:".blue().bold(),
+                dir_path.display().to_string().white(),
+                audio_files.len()
+            );
+
             // Process audio files in current directory
             if !audio_files.is_empty() {
                 for file_path in audio_files {
-                    println!("Processing: {}", file_path.display());
                     process_file(&file_path, override_files).await;
                 }
             }
-
             // If recursive, process subdirectories
             if recursive {
                 for subdir in subdirs {
-                    println!("\nEntering directory: {}", subdir.display());
                     Box::pin(process_directory(&subdir, override_files, recursive)).await;
                 }
             }
         }
         Err(e) => {
-            eprintln!("Error reading directory {}: {}", dir_path.display(), e);
+            eprintln!(
+                "{} {}",
+                "Error:".red().bold(),
+                format!("Error reading directory {}: {}", dir_path.display(), e).red()
+            );
         }
     }
 }
@@ -106,8 +123,22 @@ async fn process_file(file_path: &PathBuf, override_files: bool) {
     let metadata_result = read_metadata(file_path).await;
     match metadata_result {
         Ok(metadata) => {
+            println!(
+                "{} {}",
+                "Processing:".cyan().bold(),
+                file_path
+                    .file_name()
+                    .map(|name| name.to_string_lossy())
+                    .unwrap_or_else(|| "Unknown file".into())
+                    .to_string()
+                    .white()
+            );
             // Check if lyrics files already exist
-            println!("Found: {}", metadata);
+            println!(
+                "{} {}",
+                "Found:".green().bold(),
+                metadata.to_string().white()
+            );
             let is_instrumental;
             let lrc_exists = match get_lyrics_file_path(file_path, "lrc") {
                 Ok(path) => {
@@ -115,14 +146,22 @@ async fn process_file(file_path: &PathBuf, override_files: bool) {
                     path.exists()
                 }
                 Err(e) => {
-                    eprintln!("Error determining LRC file path: {}", e);
+                    eprintln!(
+                        "{} {}",
+                        "Error:".red().bold(),
+                        format!("Error determining LRC file path: {}", e).red()
+                    );
                     return;
                 }
             };
             let txt_exists = match get_lyrics_file_path(file_path, "txt") {
                 Ok(path) => path.exists(),
                 Err(e) => {
-                    eprintln!("Error determining TXT file path: {}", e);
+                    eprintln!(
+                        "{} {}",
+                        "Error:".red().bold(),
+                        format!("Error determining TXT file path: {}", e).red()
+                    );
                     return;
                 }
             };
@@ -149,10 +188,15 @@ async fn process_file(file_path: &PathBuf, override_files: bool) {
                             let instrumental_lrc = format!("{}\n[instrumental]", header);
                             match save_lyrics_file(file_path, &instrumental_lrc, "lrc") {
                                 Ok(_) => {
-                                    println!("Marked as Instrumental");
+                                    println!("{}", "Marked as Instrumental".yellow().bold());
                                 }
                                 Err(e) => {
-                                    println!("Failed to save instrumental LRC file: {}", e);
+                                    println!(
+                                        "{} {}",
+                                        "Failed:".red().bold(),
+                                        format!("Failed to save instrumental LRC file: {}", e)
+                                            .red()
+                                    );
                                 }
                             }
                         } else if let Some(synced_lyrics) = &lyrics_result.synced_lyrics {
@@ -160,10 +204,18 @@ async fn process_file(file_path: &PathBuf, override_files: bool) {
                             let lrc_with_header = format!("{}\n{}", header, synced_lyrics);
                             match save_lyrics_file(file_path, &lrc_with_header, "lrc") {
                                 Ok(lrc_path) => {
-                                    println!("Saved synced lyrics to: {}", lrc_path.display());
+                                    println!(
+                                        "{} {}",
+                                        "Saved synced lyrics to:".green().bold(),
+                                        lrc_path.display().to_string().white()
+                                    );
                                 }
                                 Err(e) => {
-                                    println!("Failed to save LRC file: {}", e);
+                                    println!(
+                                        "{} {}",
+                                        "Failed:".red().bold(),
+                                        format!("Failed to save LRC file: {}", e).red()
+                                    );
                                 }
                             }
                         } else if let Some(plain_lyrics) = &lyrics_result.plain_lyrics {
@@ -171,27 +223,45 @@ async fn process_file(file_path: &PathBuf, override_files: bool) {
                             let txt_with_header = format!("{}\n{}", header, plain_lyrics);
                             match save_lyrics_file(file_path, &txt_with_header, "txt") {
                                 Ok(txt_path) => {
-                                    println!("Saved plain lyrics to: {}", txt_path.display());
+                                    println!(
+                                        "{} {}",
+                                        "Saved plain lyrics to:".green().bold(),
+                                        txt_path.display().to_string().white()
+                                    );
                                 }
                                 Err(e) => {
-                                    println!("Failed to save TXT file: {}", e);
+                                    println!(
+                                        "{} {}",
+                                        "Failed:".red().bold(),
+                                        format!("Failed to save TXT file: {}", e).red()
+                                    );
                                 }
                             }
                         }
                     }
                     Err(e) => {
-                        println!("Failed to fetch lyrics: {}", e);
+                        println!(
+                            "{} {}",
+                            "Failed:".red().bold(),
+                            format!("Failed to fetch lyrics: {}", e).red()
+                        );
                     }
                 }
             } else {
                 println!(
-                    "Skipped fetching for {} - keeping existing files",
-                    &metadata.track_name
+                    "{} {} - {}",
+                    "Skipped fetching for".yellow().bold(),
+                    &metadata.track_name.white(),
+                    "keeping existing files".yellow()
                 );
             }
         }
         Err(e) => {
-            println!("Error reading metadata for {}: {}", file_path.display(), e);
+            println!(
+                "{} {}",
+                "Error:".red().bold(),
+                format!("Error reading metadata for {}: {}", file_path.display(), e).red()
+            );
         }
     }
     println!("");
