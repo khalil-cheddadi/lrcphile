@@ -16,6 +16,10 @@ struct Cli {
     /// Automatically override existing lyrics files without prompting
     #[arg(short, long, help = "Override existing lyrics files")]
     override_files: bool,
+
+    /// Recursively process subdirectories
+    #[arg(short, long, help = "Recursively process subdirectories")]
+    recursive: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -42,7 +46,6 @@ struct TrackMetadata {
     artist_name: String,
     album_name: String,
     duration: f64,
-    path: PathBuf,
 }
 
 impl std::fmt::Display for TrackMetadata {
@@ -51,13 +54,8 @@ impl std::fmt::Display for TrackMetadata {
         let seconds = (self.duration as u32) % 60;
         write!(
             f,
-            "{} - {} by {} ({}:{:02}) [{}]",
-            self.track_name,
-            self.album_name,
-            self.artist_name,
-            minutes,
-            seconds,
-            self.path.display()
+            "{} - {} by {} ({}:{:02})",
+            self.track_name, self.album_name, self.artist_name, minutes, seconds,
         )
     }
 }
@@ -67,42 +65,40 @@ async fn main() {
     let cli = Cli::parse();
 
     if cli.path.is_file() {
-        // Process single file
         process_file(&cli.path, cli.override_files).await;
     } else if cli.path.is_dir() {
-        // Process all audio files in directory
-        match get_audio_files(&cli.path) {
-            Ok(audio_files) => {
-                if audio_files.is_empty() {
-                    println!("No audio files found in directory: {}", cli.path.display());
-                    return;
-                }
-
-                println!("Found {} audio files to process", audio_files.len());
-
-                for (index, file_path) in audio_files.iter().enumerate() {
-                    println!(
-                        "\n[{}/{}] Processing: {}",
-                        index + 1,
-                        audio_files.len(),
-                        file_path.display()
-                    );
-                    process_file(file_path, cli.override_files).await;
-                }
-
-                println!("\nCompleted processing {} files", audio_files.len());
-            }
-            Err(e) => {
-                eprintln!("Error reading directory: {}", e);
-                std::process::exit(1);
-            }
-        }
+        process_directory(&cli.path, cli.override_files, cli.recursive).await;
     } else {
         eprintln!(
             "Path does not exist or is not a file or directory: {}",
             cli.path.display()
         );
         std::process::exit(1);
+    }
+}
+
+async fn process_directory(dir_path: &PathBuf, override_files: bool, recursive: bool) {
+    match scan_directory(dir_path) {
+        Ok((audio_files, subdirs)) => {
+            // Process audio files in current directory
+            if !audio_files.is_empty() {
+                for file_path in audio_files {
+                    println!("Processing: {}", file_path.display());
+                    process_file(&file_path, override_files).await;
+                }
+            }
+
+            // If recursive, process subdirectories
+            if recursive {
+                for subdir in subdirs {
+                    println!("\nEntering directory: {}", subdir.display());
+                    Box::pin(process_directory(&subdir, override_files, recursive)).await;
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Error reading directory {}: {}", dir_path.display(), e);
+        }
     }
 }
 
@@ -198,14 +194,18 @@ async fn process_file(file_path: &PathBuf, override_files: bool) {
             println!("Error reading metadata for {}: {}", file_path.display(), e);
         }
     }
+    println!("");
 }
 
-fn get_audio_files(dir_path: &PathBuf) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+fn scan_directory(
+    dir_path: &PathBuf,
+) -> Result<(Vec<PathBuf>, Vec<PathBuf>), Box<dyn std::error::Error>> {
     let audio_extensions = [
         "mp3", "flac", "wav", "ogg", "m4a", "aac", "opus", "wma", "ape", "dsf", "dff",
     ];
 
     let mut audio_files = Vec::new();
+    let mut subdirs = Vec::new();
 
     for entry in fs::read_dir(dir_path)? {
         let entry = entry?;
@@ -219,13 +219,15 @@ fn get_audio_files(dir_path: &PathBuf) -> Result<Vec<PathBuf>, Box<dyn std::erro
                     }
                 }
             }
+        } else if path.is_dir() {
+            subdirs.push(path);
         }
     }
 
-    // Sort files for consistent processing order
     audio_files.sort();
+    subdirs.sort();
 
-    Ok(audio_files)
+    Ok((audio_files, subdirs))
 }
 
 async fn read_metadata(file_path: &PathBuf) -> Result<TrackMetadata, Box<dyn std::error::Error>> {
@@ -244,7 +246,6 @@ async fn read_metadata(file_path: &PathBuf) -> Result<TrackMetadata, Box<dyn std
                 artist_name: artist,
                 album_name: album,
                 duration,
-                path: file_path.clone(),
             });
         }
     }
