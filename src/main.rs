@@ -9,9 +9,9 @@ use std::path::PathBuf;
 #[command(about = "CLI liblrc Client")]
 #[command(version = "0.1.0")]
 struct Cli {
-    /// Path to the audio file
-    #[arg(help = "Path to the audio file")]
-    file_path: PathBuf,
+    /// Path to the audio file or directory
+    #[arg(help = "Path to the audio file or directory")]
+    path: PathBuf,
 
     /// Automatically override existing lyrics files without prompting
     #[arg(short, long, help = "Override existing lyrics files")]
@@ -62,44 +62,79 @@ impl std::fmt::Display for TrackMetadata {
     }
 }
 
-#[derive(Debug)]
-struct LyricsFetchResult {
-    plain_lyrics: Option<String>,
-    synced_lyrics: Option<String>,
-    instrumental: bool,
-}
-
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let metadata_result = read_metadata(&cli.file_path).await;
+
+    if cli.path.is_file() {
+        // Process single file
+        process_file(&cli.path, cli.override_files).await;
+    } else if cli.path.is_dir() {
+        // Process all audio files in directory
+        match get_audio_files(&cli.path) {
+            Ok(audio_files) => {
+                if audio_files.is_empty() {
+                    println!("No audio files found in directory: {}", cli.path.display());
+                    return;
+                }
+
+                println!("Found {} audio files to process", audio_files.len());
+
+                for (index, file_path) in audio_files.iter().enumerate() {
+                    println!(
+                        "\n[{}/{}] Processing: {}",
+                        index + 1,
+                        audio_files.len(),
+                        file_path.display()
+                    );
+                    process_file(file_path, cli.override_files).await;
+                }
+
+                println!("\nCompleted processing {} files", audio_files.len());
+            }
+            Err(e) => {
+                eprintln!("Error reading directory: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        eprintln!(
+            "Path does not exist or is not a file or directory: {}",
+            cli.path.display()
+        );
+        std::process::exit(1);
+    }
+}
+
+async fn process_file(file_path: &PathBuf, override_files: bool) {
+    let metadata_result = read_metadata(file_path).await;
     match metadata_result {
         Ok(metadata) => {
             // Check if lyrics files already exist
             println!("Found: {}", metadata);
             let is_instrumental;
-            let lrc_exists = match get_lyrics_file_path(&cli.file_path, "lrc") {
+            let lrc_exists = match get_lyrics_file_path(file_path, "lrc") {
                 Ok(path) => {
                     is_instrumental = is_instrumental_lrc_file(&path);
                     path.exists()
                 }
                 Err(e) => {
                     eprintln!("Error determining LRC file path: {}", e);
-                    std::process::exit(1);
+                    return;
                 }
             };
-            let txt_exists = match get_lyrics_file_path(&cli.file_path, "txt") {
+            let txt_exists = match get_lyrics_file_path(file_path, "txt") {
                 Ok(path) => path.exists(),
                 Err(e) => {
                     eprintln!("Error determining TXT file path: {}", e);
-                    std::process::exit(1);
+                    return;
                 }
             };
 
             let should_fetch = if is_instrumental {
                 false
             } else if lrc_exists || txt_exists {
-                cli.override_files
+                override_files
             } else {
                 true
             };
@@ -116,7 +151,7 @@ async fn main() {
                         if lyrics_result.instrumental {
                             // Create LRC file with instrumental tag to avoid refetching
                             let instrumental_lrc = format!("{}\n[instrumental]", header);
-                            match save_lyrics_file(&cli.file_path, &instrumental_lrc, "lrc") {
+                            match save_lyrics_file(file_path, &instrumental_lrc, "lrc") {
                                 Ok(_) => {
                                     println!("Marked as Instrumental");
                                 }
@@ -127,7 +162,7 @@ async fn main() {
                         } else if let Some(synced_lyrics) = &lyrics_result.synced_lyrics {
                             // Save synced lyrics to a .lrc file
                             let lrc_with_header = format!("{}\n{}", header, synced_lyrics);
-                            match save_lyrics_file(&cli.file_path, &lrc_with_header, "lrc") {
+                            match save_lyrics_file(file_path, &lrc_with_header, "lrc") {
                                 Ok(lrc_path) => {
                                     println!("Saved synced lyrics to: {}", lrc_path.display());
                                 }
@@ -138,7 +173,7 @@ async fn main() {
                         } else if let Some(plain_lyrics) = &lyrics_result.plain_lyrics {
                             // Only save plain lyrics to a .txt file
                             let txt_with_header = format!("{}\n{}", header, plain_lyrics);
-                            match save_lyrics_file(&cli.file_path, &txt_with_header, "txt") {
+                            match save_lyrics_file(file_path, &txt_with_header, "txt") {
                                 Ok(txt_path) => {
                                     println!("Saved plain lyrics to: {}", txt_path.display());
                                 }
@@ -160,10 +195,37 @@ async fn main() {
             }
         }
         Err(e) => {
-            eprintln!("Error reading metadata: {}", e);
-            std::process::exit(1);
+            println!("Error reading metadata for {}: {}", file_path.display(), e);
         }
     }
+}
+
+fn get_audio_files(dir_path: &PathBuf) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let audio_extensions = [
+        "mp3", "flac", "wav", "ogg", "m4a", "aac", "opus", "wma", "ape", "dsf", "dff",
+    ];
+
+    let mut audio_files = Vec::new();
+
+    for entry in fs::read_dir(dir_path)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.is_file() {
+            if let Some(extension) = path.extension() {
+                if let Some(ext_str) = extension.to_str() {
+                    if audio_extensions.contains(&ext_str.to_lowercase().as_str()) {
+                        audio_files.push(path);
+                    }
+                }
+            }
+        }
+    }
+
+    // Sort files for consistent processing order
+    audio_files.sort();
+
+    Ok(audio_files)
 }
 
 async fn read_metadata(file_path: &PathBuf) -> Result<TrackMetadata, Box<dyn std::error::Error>> {
@@ -192,7 +254,7 @@ async fn read_metadata(file_path: &PathBuf) -> Result<TrackMetadata, Box<dyn std
 
 async fn fetch_lyrics(
     metadata: &TrackMetadata,
-) -> Result<LyricsFetchResult, Box<dyn std::error::Error>> {
+) -> Result<LyricsResponse, Box<dyn std::error::Error>> {
     let client = reqwest::Client::new();
 
     let url = format!(
@@ -214,11 +276,7 @@ async fn fetch_lyrics(
 
     if response.status().is_success() {
         let lyrics_response: LyricsResponse = response.json().await?;
-        Ok(LyricsFetchResult {
-            plain_lyrics: lyrics_response.plain_lyrics,
-            synced_lyrics: lyrics_response.synced_lyrics,
-            instrumental: lyrics_response.instrumental,
-        })
+        Ok(lyrics_response)
     } else if response.status() == 404 {
         Err("Track not found in LRCLIB database".into())
     } else {
