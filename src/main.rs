@@ -21,6 +21,10 @@ struct Cli {
     /// Recursively process subdirectories
     #[arg(short, long, help = "Recursively process subdirectories")]
     recursive: bool,
+
+    /// Suppress output messages
+    #[arg(short, long, help = "Suppress none important messages")]
+    silent: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -39,6 +43,19 @@ struct LyricsResponse {
     plain_lyrics: Option<String>,
     #[serde(rename = "syncedLyrics")]
     synced_lyrics: Option<String>,
+}
+
+impl LyricsResponse {
+    fn generate_header(&self) -> String {
+        let minutes = (self.duration as u32) / 60;
+        let seconds = (self.duration as u32) % 60;
+        let length = format!("{}:{:02}", minutes, seconds);
+
+        format!(
+            "[ti: {}]\n[ar: {}]\n[al: {}]\n[length: {}]\n[by: lrcphile]",
+            self.track_name, self.artist_name, self.album_name, length
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -64,14 +81,46 @@ impl std::fmt::Display for TrackMetadata {
     }
 }
 
+impl TrackMetadata {
+    async fn fetch_lyrics(self) -> Result<Option<LyricsResponse>, Box<dyn std::error::Error>> {
+        let client = reqwest::Client::new();
+
+        let url = format!(
+            "https://lrclib.net/api/get?track_name={}&artist_name={}&album_name={}&duration={}",
+            urlencoding::encode(&self.track_name),
+            urlencoding::encode(&self.artist_name),
+            urlencoding::encode(&self.album_name),
+            self.duration,
+        );
+
+        let response = client
+            .get(&url)
+            .header(
+                "User-Agent",
+                "lrcphile v0.1.0 (https://github.com/basketingballs/lrcphile)",
+            )
+            .send()
+            .await?;
+
+        if response.status().is_success() {
+            let lyrics_response: LyricsResponse = response.json().await?;
+            Ok(Some(lyrics_response))
+        } else if response.status() == 404 {
+            Ok(None)
+        } else {
+            Err(format!("API request failed with status: {}", response.status()).into())
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
 
     if cli.path.is_file() {
-        process_file(&cli.path, cli.override_files).await;
+        process_file(&cli.path, &cli).await;
     } else if cli.path.is_dir() {
-        process_directory(&cli.path, cli.override_files, cli.recursive).await;
+        process_directory(&cli.path, &cli).await;
     } else {
         eprintln!(
             "{} {}",
@@ -86,19 +135,19 @@ async fn main() {
     }
 }
 
-async fn process_directory(dir_path: &PathBuf, override_files: bool, recursive: bool) {
-    match scan_directory(dir_path) {
+async fn process_directory(path: &PathBuf, cli: &Cli) {
+    match scan_directory(&path) {
         Ok((audio_files, subdirs)) => {
             // Process audio files in current directory
             if !audio_files.is_empty() {
                 for file_path in audio_files {
-                    process_file(&file_path, override_files).await;
+                    process_file(&file_path, cli).await;
                 }
             }
             // If recursive, process subdirectories
-            if recursive {
+            if cli.recursive {
                 for subdir in subdirs {
-                    Box::pin(process_directory(&subdir, override_files, recursive)).await;
+                    Box::pin(process_directory(&subdir, cli)).await;
                 }
             }
         }
@@ -106,24 +155,19 @@ async fn process_directory(dir_path: &PathBuf, override_files: bool, recursive: 
             eprintln!(
                 "{} {}",
                 "Error:".red().bold(),
-                format!("Error reading directory {}: {}", dir_path.display(), e).red()
+                format!("Error reading directory {}: {}", path.display(), e).red()
             );
         }
     }
 }
 
-async fn process_file(file_path: &PathBuf, override_files: bool) {
-    let metadata_result = read_metadata(file_path).await;
+async fn process_file(path: &PathBuf, cli: &Cli) {
+    let metadata_result = read_metadata(path).await;
     match metadata_result {
         Ok(metadata) => {
-            print!(
-                "{} {} ",
-                "Found:".green().bold(),
-                metadata.to_string().white()
-            );
             // Check if lyrics files already exist
             let is_instrumental;
-            let lrc_exists = match get_lyrics_file_path(file_path, "lrc") {
+            let lrc_exists = match get_lyrics_file_path(path, "lrc") {
                 Ok(path) => {
                     is_instrumental = is_instrumental_lrc_file(&path);
                     path.exists()
@@ -137,7 +181,7 @@ async fn process_file(file_path: &PathBuf, override_files: bool) {
                     return;
                 }
             };
-            let txt_exists = match get_lyrics_file_path(file_path, "txt") {
+            let txt_exists = match get_lyrics_file_path(path, "txt") {
                 Ok(path) => path.exists(),
                 Err(e) => {
                     eprintln!(
@@ -152,24 +196,26 @@ async fn process_file(file_path: &PathBuf, override_files: bool) {
             let should_fetch = if is_instrumental {
                 false
             } else if lrc_exists || txt_exists {
-                override_files
+                cli.override_files
             } else {
                 true
             };
+            if should_fetch || !cli.silent {
+                print!(
+                    "{} {} ",
+                    "Found:".green().bold(),
+                    metadata.to_string().white()
+                );
+            }
 
             if should_fetch {
-                match fetch_lyrics(&metadata).await {
+                match metadata.fetch_lyrics().await {
                     Ok(Some(lyrics_result)) => {
-                        let header = generate_header(
-                            &metadata.track_name,
-                            &metadata.artist_name,
-                            &metadata.album_name,
-                            metadata.duration,
-                        );
+                        let header = lyrics_result.generate_header();
                         if lyrics_result.instrumental {
                             // Create LRC file with instrumental tag to avoid refetching
                             let instrumental_lrc = format!("{}\n[instrumental]", header);
-                            match save_lyrics_file(file_path, &instrumental_lrc, "lrc") {
+                            match save_lyrics_file(&cli.path, &instrumental_lrc, "lrc") {
                                 Ok(_) => {
                                     println!("{}", "Marked as Instrumental".yellow().bold());
                                 }
@@ -185,7 +231,7 @@ async fn process_file(file_path: &PathBuf, override_files: bool) {
                         } else if let Some(synced_lyrics) = &lyrics_result.synced_lyrics {
                             // Save synced lyrics to a .lrc file
                             let lrc_with_header = format!("{}\n{}", header, synced_lyrics);
-                            match save_lyrics_file(file_path, &lrc_with_header, "lrc") {
+                            match save_lyrics_file(path, &lrc_with_header, "lrc") {
                                 Ok(lrc_path) => {
                                     println!(
                                         "{} {}",
@@ -204,7 +250,7 @@ async fn process_file(file_path: &PathBuf, override_files: bool) {
                         } else if let Some(plain_lyrics) = &lyrics_result.plain_lyrics {
                             // Only save plain lyrics to a .txt file
                             let txt_with_header = format!("{}\n{}", header, plain_lyrics);
-                            match save_lyrics_file(file_path, &txt_with_header, "txt") {
+                            match save_lyrics_file(path, &txt_with_header, "txt") {
                                 Ok(txt_path) => {
                                     println!(
                                         "{} {}",
@@ -234,21 +280,23 @@ async fn process_file(file_path: &PathBuf, override_files: bool) {
                     }
                 }
             } else {
-                println!(
-                    "{}",
-                    if is_instrumental {
-                        "Track Marked as instrumental, Skipping".bold().yellow()
-                    } else {
-                        "Existing lyrics found, Skipping".bold().yellow()
-                    }
-                );
+                if !cli.silent {
+                    println!(
+                        "{}",
+                        if is_instrumental {
+                            "Track Marked as instrumental, Skipping".bold().yellow()
+                        } else {
+                            "Existing lyrics found, Skipping".bold().yellow()
+                        }
+                    );
+                }
             }
         }
         Err(e) => {
             eprintln!(
                 "{} {}",
                 "Error:".red().bold(),
-                format!("Error reading metadata for {}: {}", file_path.display(), e).red()
+                format!("Error reading metadata for {}: {}", path.display(), e).red()
             );
         }
     }
@@ -310,38 +358,6 @@ async fn read_metadata(file_path: &PathBuf) -> Result<TrackMetadata, Box<dyn std
     Err("Missing required metadata (title, artist, or album)".into())
 }
 
-async fn fetch_lyrics(
-    metadata: &TrackMetadata,
-) -> Result<Option<LyricsResponse>, Box<dyn std::error::Error>> {
-    let client = reqwest::Client::new();
-
-    let url = format!(
-        "https://lrclib.net/api/get?track_name={}&artist_name={}&album_name={}&duration={}",
-        urlencoding::encode(&metadata.track_name),
-        urlencoding::encode(&metadata.artist_name),
-        urlencoding::encode(&metadata.album_name),
-        metadata.duration,
-    );
-
-    let response = client
-        .get(&url)
-        .header(
-            "User-Agent",
-            "lrcphile v0.1.0 (https://github.com/basketingballs/lrcphile)",
-        )
-        .send()
-        .await?;
-
-    if response.status().is_success() {
-        let lyrics_response: LyricsResponse = response.json().await?;
-        Ok(Some(lyrics_response))
-    } else if response.status() == 404 {
-        Ok(None)
-    } else {
-        Err(format!("API request failed with status: {}", response.status()).into())
-    }
-}
-
 fn get_lyrics_file_path(
     audio_file_path: &PathBuf,
     extension: &str,
@@ -377,17 +393,4 @@ fn save_lyrics_file(
     // Write the lyrics to the file
     fs::write(&file_path, lyrics)?;
     Ok(file_path)
-}
-
-fn generate_header(title: &str, artist: &str, album: &str, duration: f64) -> String {
-    let minutes = (duration as u32) / 60;
-    let seconds = (duration as u32) % 60;
-    let length = format!("{}:{:02}", minutes, seconds);
-
-    let header = format!(
-        "[ti: {}]\n[ar: {}]\n[al: {}]\n[au: {}]\n[length: {}]\n[by: lrcphile]",
-        title, artist, album, artist, length
-    );
-
-    header
 }
