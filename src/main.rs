@@ -2,8 +2,7 @@ use clap::Parser;
 use colored::Colorize;
 use lofty::{file::AudioFile, prelude::TaggedFileExt, probe::Probe, tag::Accessor};
 use serde::Deserialize;
-use std::fs;
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 #[derive(Parser)]
 #[command(name = "lrcphile")]
@@ -115,19 +114,19 @@ impl TrackMetadata {
 
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
+    let args = Cli::parse();
 
-    if cli.path.is_file() {
-        process_file(&cli.path, &cli).await;
-    } else if cli.path.is_dir() {
-        process_directory(&cli.path, &cli).await;
+    if args.path.is_file() {
+        process_file(&args.path, &args).await;
+    } else if args.path.is_dir() {
+        process_directory(&args.path, &args).await;
     } else {
         eprintln!(
             "{} {}",
             "Error:".red().bold(),
             format!(
                 "Path does not exist or is not a file or directory: {}",
-                cli.path.display()
+                args.path.display()
             )
             .red()
         );
@@ -135,19 +134,19 @@ async fn main() {
     }
 }
 
-async fn process_directory(path: &PathBuf, cli: &Cli) {
-    match scan_directory(&path) {
+async fn process_directory(dir_path: &PathBuf, args: &Cli) {
+    match scan_directory(&dir_path) {
         Ok((audio_files, subdirs)) => {
             // Process audio files in current directory
             if !audio_files.is_empty() {
                 for file_path in audio_files {
-                    process_file(&file_path, cli).await;
+                    process_file(&file_path, args).await;
                 }
             }
             // If recursive, process subdirectories
-            if cli.recursive {
+            if args.recursive {
                 for subdir in subdirs {
-                    Box::pin(process_directory(&subdir, cli)).await;
+                    Box::pin(process_directory(&subdir, args)).await;
                 }
             }
         }
@@ -155,19 +154,19 @@ async fn process_directory(path: &PathBuf, cli: &Cli) {
             eprintln!(
                 "{} {}",
                 "Error:".red().bold(),
-                format!("Error reading directory {}: {}", path.display(), e).red()
+                format!("Error reading directory {}: {}", dir_path.display(), e).red()
             );
         }
     }
 }
 
-async fn process_file(path: &PathBuf, cli: &Cli) {
-    let metadata_result = read_metadata(path).await;
+async fn process_file(file_path: &PathBuf, args: &Cli) {
+    let metadata_result = read_metadata(file_path).await;
     match metadata_result {
         Ok(metadata) => {
             // Check if lyrics files already exist
             let is_instrumental;
-            let lrc_exists = match get_lyrics_file_path(path, "lrc") {
+            let lrc_exists = match get_lyrics_file_path(file_path, "lrc") {
                 Ok(path) => {
                     is_instrumental = is_instrumental_lrc_file(&path);
                     path.exists()
@@ -181,7 +180,7 @@ async fn process_file(path: &PathBuf, cli: &Cli) {
                     return;
                 }
             };
-            let txt_exists = match get_lyrics_file_path(path, "txt") {
+            let txt_exists = match get_lyrics_file_path(file_path, "txt") {
                 Ok(path) => path.exists(),
                 Err(e) => {
                     eprintln!(
@@ -196,11 +195,11 @@ async fn process_file(path: &PathBuf, cli: &Cli) {
             let should_fetch = if is_instrumental {
                 false
             } else if lrc_exists || txt_exists {
-                cli.override_files
+                args.override_files
             } else {
                 true
             };
-            if should_fetch || !cli.silent {
+            if should_fetch || !args.silent {
                 print!(
                     "{} {} ",
                     "Found:".green().bold(),
@@ -215,7 +214,7 @@ async fn process_file(path: &PathBuf, cli: &Cli) {
                         if lyrics_result.instrumental {
                             // Create LRC file with instrumental tag to avoid refetching
                             let instrumental_lrc = format!("{}\n[instrumental]", header);
-                            match save_lyrics_file(&cli.path, &instrumental_lrc, "lrc") {
+                            match save_lyrics_file(&args.path, &instrumental_lrc, "lrc") {
                                 Ok(_) => {
                                     println!("{}", "Marked as Instrumental".yellow().bold());
                                 }
@@ -231,7 +230,7 @@ async fn process_file(path: &PathBuf, cli: &Cli) {
                         } else if let Some(synced_lyrics) = &lyrics_result.synced_lyrics {
                             // Save synced lyrics to a .lrc file
                             let lrc_with_header = format!("{}\n{}", header, synced_lyrics);
-                            match save_lyrics_file(path, &lrc_with_header, "lrc") {
+                            match save_lyrics_file(file_path, &lrc_with_header, "lrc") {
                                 Ok(lrc_path) => {
                                     println!(
                                         "{} {}",
@@ -250,7 +249,7 @@ async fn process_file(path: &PathBuf, cli: &Cli) {
                         } else if let Some(plain_lyrics) = &lyrics_result.plain_lyrics {
                             // Only save plain lyrics to a .txt file
                             let txt_with_header = format!("{}\n{}", header, plain_lyrics);
-                            match save_lyrics_file(path, &txt_with_header, "txt") {
+                            match save_lyrics_file(file_path, &txt_with_header, "txt") {
                                 Ok(txt_path) => {
                                     println!(
                                         "{} {}",
@@ -280,7 +279,7 @@ async fn process_file(path: &PathBuf, cli: &Cli) {
                     }
                 }
             } else {
-                if !cli.silent {
+                if !args.silent {
                     println!(
                         "{}",
                         if is_instrumental {
@@ -296,7 +295,7 @@ async fn process_file(path: &PathBuf, cli: &Cli) {
             eprintln!(
                 "{} {}",
                 "Error:".red().bold(),
-                format!("Error reading metadata for {}: {}", path.display(), e).red()
+                format!("Error reading metadata for {}: {}", file_path.display(), e).red()
             );
         }
     }
@@ -340,16 +339,18 @@ async fn read_metadata(file_path: &PathBuf) -> Result<TrackMetadata, Box<dyn std
 
     // Return metadata for potential lyrics fetching
     if let Some(tag) = tagged_file.primary_tag() {
-        let title = tag.title().map(|s| s.to_string());
-        let artist = tag.artist().map(|s| s.to_string());
-        let album = tag.album().map(|s| s.to_string());
+        let track_name = tag.title().map(|s| s.to_string());
+        let artist_name = tag.artist().map(|s| s.to_string());
+        let album_name = tag.album().map(|s| s.to_string());
         let duration = tagged_file.properties().duration().as_secs() as f64;
 
-        if let (Some(title), Some(artist), Some(album)) = (title, artist, album) {
+        if let (Some(track_name), Some(artist_name), Some(album_name)) =
+            (track_name, artist_name, album_name)
+        {
             return Ok(TrackMetadata {
-                track_name: title,
-                artist_name: artist,
-                album_name: album,
+                track_name,
+                artist_name,
+                album_name,
                 duration,
             });
         }
@@ -385,11 +386,11 @@ fn is_instrumental_lrc_file(lrc_path: &PathBuf) -> bool {
 }
 
 fn save_lyrics_file(
-    audio_file_path: &PathBuf,
+    file_path: &PathBuf,
     lyrics: &str,
     extension: &str,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let file_path = get_lyrics_file_path(audio_file_path, extension)?;
+    let file_path = get_lyrics_file_path(file_path, extension)?;
     // Write the lyrics to the file
     fs::write(&file_path, lyrics)?;
     Ok(file_path)
