@@ -42,11 +42,17 @@ Process recursively with options:
 lrcphile -r -o /path/to/music/
 ```
 
+Use a different LRCLIB instance:
+```bash
+lrcphile --url https://my-lrclib.example.com /path/to/music/
+```
+
 ### Options
 
 - `-r, --recursive`: Recursively process subdirectories
 - `-o, --override-files`: Override existing lyrics files
 - `-s, --silent`: Suppress non-important messages
+- `--url <URL>`: URL for the lyrics database instance (default: https://lrclib.net)
 
 ## Requirements
 

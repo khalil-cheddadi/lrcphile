@@ -24,6 +24,15 @@ struct Cli {
     /// Suppress output messages
     #[arg(short, long, help = "Suppress none important messages")]
     silent: bool,
+
+    /// URL for lyrics database instance
+    #[arg(
+        short,
+        long,
+        default_value = "https://lrclib.net",
+        help = "URL for the lyrics database instance (e.g., self-hosted LRCLIB)"
+    )]
+    url: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -81,11 +90,15 @@ impl std::fmt::Display for TrackMetadata {
 }
 
 impl TrackMetadata {
-    async fn fetch_lyrics(self) -> Result<Option<LyricsResponse>, Box<dyn std::error::Error>> {
+    async fn fetch_lyrics(
+        self,
+        url: &str,
+    ) -> Result<Option<LyricsResponse>, Box<dyn std::error::Error>> {
         let client = reqwest::Client::new();
 
-        let url = format!(
-            "https://lrclib.net/api/get?track_name={}&artist_name={}&album_name={}&duration={}",
+        let api_url = format!(
+            "{}/api/get?track_name={}&artist_name={}&album_name={}&duration={}",
+            url.trim_end_matches('/'),
             urlencoding::encode(&self.track_name),
             urlencoding::encode(&self.artist_name),
             urlencoding::encode(&self.album_name),
@@ -93,7 +106,7 @@ impl TrackMetadata {
         );
 
         let response = client
-            .get(&url)
+            .get(&api_url)
             .header(
                 "User-Agent",
                 "lrcphile v0.1.0 (https://github.com/khalil-cheddadi/lrcphile)",
@@ -208,7 +221,7 @@ async fn process_file(file_path: &PathBuf, args: &Cli) {
             }
 
             if should_fetch {
-                match metadata.fetch_lyrics().await {
+                match metadata.fetch_lyrics(&args.url).await {
                     Ok(Some(lyrics_result)) => {
                         let header = lyrics_result.generate_header();
                         if lyrics_result.instrumental {
