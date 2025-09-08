@@ -96,7 +96,7 @@ impl TrackMetadata {
             .get(&url)
             .header(
                 "User-Agent",
-                "lrcphile v0.1.0 (https://github.com/basketingballs/lrcphile)",
+                "lrcphile v0.1.0 (https://github.com/khalil-cheddadi/lrcphile)",
             )
             .send()
             .await?;
