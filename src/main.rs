@@ -14,7 +14,7 @@ struct Cli {
     path: PathBuf,
 
     /// Automatically override existing lyrics files without prompting
-    #[arg(short, long, help = "Override existing lyrics files")]
+    #[arg(short, long = "override", help = "Override existing lyrics files")]
     override_files: bool,
 
     /// Recursively process subdirectories
