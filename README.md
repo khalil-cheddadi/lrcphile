@@ -27,28 +27,34 @@ cargo install --path .
 
 ## Usage
 
+Process your entire music library (defaults to system music directory):
+```bash
+lrcphile
+```
+
 Process a single audio file:
 ```bash
 lrcphile /path/to/song.mp3
 ```
 
-Process a directory:
+Process a specific directory:
 ```bash
 lrcphile /path/to/music/
 ```
 
-Process recursively with options:
+Process recursively and override existing lyrics files:
 ```bash
-lrcphile -r -o /path/to/music/
+lrcphile -r -o
 ```
 
 Use a different LRCLIB instance:
 ```bash
-lrcphile --url https://my-lrclib.example.com /path/to/music/
+lrcphile --url https://my-lrclib.example.com
 ```
 
 ### Options
 
+- `[PATH]`: Path to audio file or directory (defaults to system music directory)
 - `-r, --recursive`: Recursively process subdirectories
 - `-o, --override`: Override existing lyrics files
 - `-s, --silent`: Suppress non-important messages

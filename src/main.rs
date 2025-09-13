@@ -1,5 +1,6 @@
 use clap::Parser;
 use colored::Colorize;
+use directories::UserDirs;
 use lofty::{file::AudioFile, prelude::TaggedFileExt, probe::Probe, tag::Accessor};
 use serde::Deserialize;
 use std::{fs, path::PathBuf};
@@ -9,9 +10,9 @@ use std::{fs, path::PathBuf};
 #[command(about = "CLI liblrc Client")]
 #[command(version = "0.1.0")]
 struct Cli {
-    /// Path to the audio file or directory
-    #[arg(help = "Path to the audio file or directory")]
-    path: PathBuf,
+    /// Path to the audio file or directory (defaults to music directory)
+    #[arg(help = "Path to the audio file or directory (defaults to music directory)")]
+    path: Option<PathBuf>,
 
     /// Automatically override existing lyrics files without prompting
     #[arg(short, long = "override", help = "Override existing lyrics files")]
@@ -129,17 +130,26 @@ impl TrackMetadata {
 async fn main() {
     let args = Cli::parse();
 
-    if args.path.is_file() {
-        process_file(&args.path, &args).await;
-    } else if args.path.is_dir() {
-        process_directory(&args.path, &args).await;
+    let path = match &args.path {
+        Some(p) => p.clone(),
+        None => UserDirs::new()
+            .expect("Failed to get user directories")
+            .audio_dir()
+            .unwrap()
+            .to_path_buf(),
+    };
+
+    if path.is_file() {
+        process_file(&path, &args).await;
+    } else if path.is_dir() {
+        process_directory(&path, &args).await;
     } else {
         eprintln!(
             "{} {}",
             "Error:".red().bold(),
             format!(
                 "Path does not exist or is not a file or directory: {}",
-                args.path.display()
+                path.display()
             )
             .red()
         );
@@ -227,7 +237,7 @@ async fn process_file(file_path: &PathBuf, args: &Cli) {
                         if lyrics_result.instrumental {
                             // Create LRC file with instrumental tag to avoid refetching
                             let instrumental_lrc = format!("{}\n[instrumental]", header);
-                            match save_lyrics_file(&args.path, &instrumental_lrc, "lrc") {
+                            match save_lyrics_file(file_path, &instrumental_lrc, "lrc") {
                                 Ok(_) => {
                                     println!("{}", "Marked as Instrumental".yellow().bold());
                                 }
