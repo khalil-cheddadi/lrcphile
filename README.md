@@ -5,7 +5,7 @@ A CLI tool for automatically downloading lyrics for your music collection from t
 ## Features
 
 - Fetches synchronized (.lrc) and plain text (.txt) lyrics
-- Supports batch processing of directories
+- Supports batch processing of directories with progress tracking
 - Recursive directory scanning
 - Handles instrumental tracks
 - Preserves existing lyrics files unless specified otherwise
@@ -57,8 +57,7 @@ lrcphile --url https://my-lrclib.example.com
 - `[PATH]`: Path to audio file or directory (defaults to system music directory)
 - `-r, --recursive`: Recursively process subdirectories
 - `-o, --override`: Override existing lyrics files
-- `-s, --silent`: Suppress non-important messages
-- `--url <URL>`: URL for the lyrics database instance (default: https://lrclib.net)
+- `-u, --url <URL>`: URL for the lyrics database instance (default: https://lrclib.net)
 
 ## Requirements
 

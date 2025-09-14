@@ -1,11 +1,14 @@
 use clap::Parser;
 use colored::Colorize;
 use directories::UserDirs;
+use futures::stream::{self, StreamExt};
+use indicatif::{ProgressBar, ProgressStyle};
 use lofty::{file::AudioFile, prelude::TaggedFileExt, probe::Probe, tag::Accessor};
 use serde::Deserialize;
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, sync::Arc};
+use tokio::sync::Mutex;
 
-#[derive(Parser)]
+#[derive(Parser, Clone)]
 #[command(name = "lrcphile")]
 #[command(about = "CLI liblrc Client")]
 #[command(version = "0.1.0")]
@@ -21,10 +24,6 @@ struct Cli {
     /// Recursively process subdirectories
     #[arg(short, long, help = "Recursively process subdirectories")]
     recursive: bool,
-
-    /// Suppress output messages
-    #[arg(short, long, help = "Suppress none important messages")]
-    silent: bool,
 
     /// URL for lyrics database instance
     #[arg(
@@ -75,18 +74,62 @@ struct TrackMetadata {
     duration: f64,
 }
 
-impl std::fmt::Display for TrackMetadata {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let minutes = (self.duration as u32) / 60;
-        let seconds = (self.duration as u32) % 60;
-        write!(
-            f,
-            "{} - {} by {} ({})",
-            self.track_name.bright_white().bold(),
-            self.album_name.bright_cyan(),
-            self.artist_name.bright_yellow(),
-            format!("{}:{:02}", minutes, seconds).bright_magenta()
-        )
+#[derive(Debug, Clone)]
+struct ProcessingStats {
+    success: usize,
+    failed: usize,
+    skipped: usize,
+    total: usize,
+}
+
+impl ProcessingStats {
+    fn new(total: usize) -> Self {
+        Self {
+            success: 0,
+            failed: 0,
+            skipped: 0,
+            total,
+        }
+    }
+
+    fn increment_success(&mut self) {
+        self.success += 1;
+    }
+
+    fn increment_failed(&mut self) {
+        self.failed += 1;
+    }
+
+    fn increment_skipped(&mut self) {
+        self.skipped += 1;
+    }
+
+    fn display_summary(&self) {
+        println!("\n{}", "Processing Summary:".bright_cyan().bold());
+        println!(
+            "  {} {} {}",
+            "Processed:".white(),
+            self.total.to_string().bright_white().bold(),
+            "files".white()
+        );
+        println!(
+            "  {} {} {}",
+            "Successful:".green(),
+            self.success.to_string().bright_green().bold(),
+            "files".green()
+        );
+        println!(
+            "  {} {} {}",
+            "Failed:".red(),
+            self.failed.to_string().bright_red().bold(),
+            "files".red()
+        );
+        println!(
+            "  {} {} {}",
+            "Skipped (existing/instrumental):".yellow(),
+            self.skipped.to_string().bright_yellow().bold(),
+            "files".yellow()
+        );
     }
 }
 
@@ -140,9 +183,63 @@ async fn main() {
     };
 
     if path.is_file() {
-        process_file(&path, &args).await;
+        process_file(&path, &args, None).await;
     } else if path.is_dir() {
-        process_directory(&path, &args).await;
+        match process_directory(&path, args.recursive) {
+            Ok(audio_files) => {
+                println!(
+                    "{} {}",
+                    "Found:".green().bold(),
+                    format!("{} audio files", audio_files.len()).bright_cyan()
+                );
+
+                if audio_files.len() == 0 {
+                    println!("{}", "No audio files found.".yellow());
+                    return;
+                }
+
+                // Create progress bar
+                let progress = ProgressBar::new(audio_files.len() as u64);
+                progress.set_style(
+                    ProgressStyle::default_bar()
+                        .template("[{bar:40}] {pos}/{len} {msg}")
+                        .unwrap()
+                        .progress_chars("# "),
+                );
+                progress.set_message("Processing audio files...");
+
+                let stats = Arc::new(Mutex::new(ProcessingStats::new(audio_files.len())));
+
+                // Process files concurrently with a limit of 4
+                let concurrent_limit = 4;
+                stream::iter(audio_files)
+                    .map(|file_path| {
+                        let args_clone = args.clone();
+                        let progress_clone = progress.clone();
+                        let stats_clone = stats.clone();
+                        async move {
+                            process_file(&file_path, &args_clone, Some(stats_clone)).await;
+                            progress_clone.inc(1);
+                        }
+                    })
+                    .buffer_unordered(concurrent_limit)
+                    .collect::<Vec<_>>()
+                    .await;
+
+                progress.finish_with_message("Processing complete!");
+
+                let final_stats = stats.lock().await;
+                final_stats.display_summary();
+            }
+            Err(e) => {
+                eprintln!(
+                    "{} {}",
+                    "Error:".red().bold(),
+                    format!("Error collecting tracks from {}: {}", path.display(), e).red()
+                );
+                std::process::exit(1);
+            }
+        }
     } else {
         eprintln!(
             "{} {}",
@@ -157,34 +254,48 @@ async fn main() {
     }
 }
 
-async fn process_directory(dir_path: &PathBuf, args: &Cli) {
-    match scan_directory(&dir_path) {
-        Ok((audio_files, subdirs)) => {
-            // Process audio files in current directory
-            if !audio_files.is_empty() {
-                for file_path in audio_files {
-                    process_file(&file_path, args).await;
+fn process_directory(
+    dir_path: &PathBuf,
+    recursive: bool,
+) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let mut all_tracks = Vec::new();
+    let audio_extensions = [
+        "mp3", "flac", "wav", "ogg", "m4a", "aac", "opus", "wma", "ape", "dsf", "dff",
+    ];
+    for entry in fs::read_dir(dir_path)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.is_file() {
+            if let Some(extension) = path.extension() {
+                if let Some(ext_str) = extension.to_str() {
+                    if audio_extensions.contains(&ext_str.to_lowercase().as_str()) {
+                        all_tracks.push(path);
+                    }
                 }
             }
-            // If recursive, process subdirectories
-            if args.recursive {
-                for subdir in subdirs {
-                    Box::pin(process_directory(&subdir, args)).await;
+        } else if path.is_dir() && recursive {
+            match process_directory(&path, recursive) {
+                Ok(sub_tracks) => all_tracks.extend(sub_tracks),
+                Err(e) => {
+                    eprintln!(
+                        "{} {}",
+                        "Warning:".yellow().bold(),
+                        format!("Error reading subdirectory {}: {}", path.display(), e).yellow()
+                    );
                 }
             }
-        }
-        Err(e) => {
-            eprintln!(
-                "{} {}",
-                "Error:".red().bold(),
-                format!("Error reading directory {}: {}", dir_path.display(), e).red()
-            );
         }
     }
+
+    all_tracks.sort();
+
+    Ok(all_tracks)
 }
 
-async fn process_file(file_path: &PathBuf, args: &Cli) {
+async fn process_file(file_path: &PathBuf, args: &Cli, stats: Option<Arc<Mutex<ProcessingStats>>>) {
     let metadata_result = read_metadata(file_path).await;
+    let stats = stats.unwrap_or(Arc::new(Mutex::new(ProcessingStats::new(0))));
     match metadata_result {
         Ok(metadata) => {
             // Check if lyrics files already exist
@@ -222,15 +333,10 @@ async fn process_file(file_path: &PathBuf, args: &Cli) {
             } else {
                 true
             };
-            if should_fetch || !args.silent {
-                print!(
-                    "{} {} ",
-                    "Found:".green().bold(),
-                    metadata.to_string().white()
-                );
-            }
 
-            if should_fetch {
+            if !should_fetch {
+                stats.lock().await.increment_skipped();
+            } else {
                 match metadata.fetch_lyrics(&args.url).await {
                     Ok(Some(lyrics_result)) => {
                         let header = lyrics_result.generate_header();
@@ -239,7 +345,7 @@ async fn process_file(file_path: &PathBuf, args: &Cli) {
                             let instrumental_lrc = format!("{}\n[instrumental]", header);
                             match save_lyrics_file(file_path, &instrumental_lrc, "lrc") {
                                 Ok(_) => {
-                                    println!("{}", "Marked as Instrumental".yellow().bold());
+                                    stats.lock().await.increment_success();
                                 }
                                 Err(e) => {
                                     eprintln!(
@@ -248,18 +354,15 @@ async fn process_file(file_path: &PathBuf, args: &Cli) {
                                         format!("Failed to save instrumental LRC file: {}", e)
                                             .red()
                                     );
+                                    stats.lock().await.increment_failed();
                                 }
                             }
                         } else if let Some(synced_lyrics) = &lyrics_result.synced_lyrics {
                             // Save synced lyrics to a .lrc file
                             let lrc_with_header = format!("{}\n{}", header, synced_lyrics);
                             match save_lyrics_file(file_path, &lrc_with_header, "lrc") {
-                                Ok(lrc_path) => {
-                                    println!(
-                                        "{} {}",
-                                        "Saved Synced Lyrics to:".green().bold(),
-                                        lrc_path.display().to_string().white()
-                                    );
+                                Ok(_) => {
+                                    stats.lock().await.increment_success();
                                 }
                                 Err(e) => {
                                     eprintln!(
@@ -267,18 +370,15 @@ async fn process_file(file_path: &PathBuf, args: &Cli) {
                                         "Failed:".red().bold(),
                                         format!("Failed to save LRC file: {}", e).red()
                                     );
+                                    stats.lock().await.increment_failed();
                                 }
                             }
                         } else if let Some(plain_lyrics) = &lyrics_result.plain_lyrics {
                             // Only save plain lyrics to a .txt file
                             let txt_with_header = format!("{}\n{}", header, plain_lyrics);
                             match save_lyrics_file(file_path, &txt_with_header, "txt") {
-                                Ok(txt_path) => {
-                                    println!(
-                                        "{} {}",
-                                        "Saved Plain Lyrics to:".green().bold(),
-                                        txt_path.display().to_string().white()
-                                    );
+                                Ok(_) => {
+                                    stats.lock().await.increment_success();
                                 }
                                 Err(e) => {
                                     eprintln!(
@@ -286,12 +386,13 @@ async fn process_file(file_path: &PathBuf, args: &Cli) {
                                         "Failed:".red().bold(),
                                         format!("Failed to save TXT file: {}", e).red()
                                     );
+                                    stats.lock().await.increment_failed();
                                 }
                             }
                         }
                     }
                     Ok(None) => {
-                        println!("{}", "Track not found in LRCLIB database".red());
+                        stats.lock().await.increment_failed();
                     }
                     Err(e) => {
                         eprintln!(
@@ -299,62 +400,15 @@ async fn process_file(file_path: &PathBuf, args: &Cli) {
                             "Failed:".red().bold(),
                             format!("Failed to fetch lyrics: {}", e).red()
                         );
-                    }
-                }
-            } else {
-                if !args.silent {
-                    println!(
-                        "{}",
-                        if is_instrumental {
-                            "Track Marked as instrumental, Skipping".bold().yellow()
-                        } else {
-                            "Existing lyrics found, Skipping".bold().yellow()
-                        }
-                    );
-                }
-            }
-        }
-        Err(e) => {
-            eprintln!(
-                "{} {}",
-                "Error:".red().bold(),
-                format!("Error reading metadata for {}: {}", file_path.display(), e).red()
-            );
-        }
-    }
-}
-
-fn scan_directory(
-    dir_path: &PathBuf,
-) -> Result<(Vec<PathBuf>, Vec<PathBuf>), Box<dyn std::error::Error>> {
-    let audio_extensions = [
-        "mp3", "flac", "wav", "ogg", "m4a", "aac", "opus", "wma", "ape", "dsf", "dff",
-    ];
-
-    let mut audio_files = Vec::new();
-    let mut subdirs = Vec::new();
-
-    for entry in fs::read_dir(dir_path)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.is_file() {
-            if let Some(extension) = path.extension() {
-                if let Some(ext_str) = extension.to_str() {
-                    if audio_extensions.contains(&ext_str.to_lowercase().as_str()) {
-                        audio_files.push(path);
+                        stats.lock().await.increment_failed();
                     }
                 }
             }
-        } else if path.is_dir() {
-            subdirs.push(path);
+        }
+        Err(_) => {
+            stats.lock().await.increment_failed();
         }
     }
-
-    audio_files.sort();
-    subdirs.sort();
-
-    Ok((audio_files, subdirs))
 }
 
 async fn read_metadata(file_path: &PathBuf) -> Result<TrackMetadata, Box<dyn std::error::Error>> {
@@ -413,8 +467,8 @@ fn save_lyrics_file(
     lyrics: &str,
     extension: &str,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let file_path = get_lyrics_file_path(file_path, extension)?;
     // Write the lyrics to the file
+    let file_path = get_lyrics_file_path(file_path, extension)?;
     fs::write(&file_path, lyrics)?;
     Ok(file_path)
 }
